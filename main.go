@@ -10,23 +10,28 @@ import (
 	"strings"
 )
 
-// https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
-func uuidv4() {
-	f, err := os.Open("/dev/random")
-	if err != nil {
-		panic(err)
+func assert(b bool, msg string) {
+	if !b {
+		panic(msg)
 	}
+}
+
+func assertEq[C comparable](a C, b C, prefix string) {
+	if a != b {
+		panic(fmt.Sprintf("%s '%v' != '%v'", prefix, a, b))
+	}
+}
+
+// https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
+func uuidv4() string {
+	f, err := os.Open("/dev/random")
+	assert(err == nil, fmt.Sprintf("could not open /dev/random: %s", err))
 	defer f.Close()
 
 	buf := make([]byte, 16)
 	n, err := f.Read(buf)
-	if err != nil {
-		panic(err)
-	}
-
-	if n != len(buf) {
-		panic("Expected 16 bytes")
-	}
+	assert(err == nil, fmt.Sprintf("could not read 16 bytes from /dev/random: %s", err))
+	assert(n == len(buf), "expected 16 bytes from /dev/random")
 
 	// Set bit 6 to 0
 	buf[8] &= ^(byte(1) << 6)
@@ -54,11 +59,15 @@ type objectStorage interface {
 }
 
 type fileObjectStorage struct {
-	baseDir string
+	basedir string
+}
+
+func newFileObjectStorage(basedir string) *fileObjectStorage {
+	return &fileObjectStorage{basedir}
 }
 
 func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
-	filename := path.Join(fos.baseDir, name)
+	filename := path.Join(fos.basedir, name)
 	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_EXCL|os.O_CREATE, 0644)
 	if err != nil {
 		return err
@@ -71,10 +80,7 @@ func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
 		n, err := f.Write(bytes[written:toWrite])
 		if err != nil {
 			removeErr := os.Remove(filename)
-			if removeErr != nil {
-				panic(removeErr)
-			}
-
+			assert(removeErr == nil, "could not remove")
 			return err
 		}
 
@@ -84,20 +90,14 @@ func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
 	err = f.Sync()
 	if err != nil {
 		removeErr := os.Remove(filename)
-		if removeErr != nil {
-			panic(removeErr)
-		}
-
+		assert(removeErr == nil, "could not remove")
 		return err
 	}
 
 	err = f.Close()
 	if err != nil {
 		removeErr := os.Remove(filename)
-		if removeErr != nil {
-			panic(removeErr)
-		}
-
+		assert(removeErr == nil, "could not remove")
 		return err
 	}
 
@@ -105,7 +105,7 @@ func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
 }
 
 func (fos *fileObjectStorage) listPrefix(prefix string) ([]string, error) {
-	dir := path.Join(fos.baseDir)
+	dir := path.Join(fos.basedir)
 	f, err := os.Open(dir)
 	if err != nil {
 		return nil, err
@@ -130,12 +130,12 @@ func (fos *fileObjectStorage) listPrefix(prefix string) ([]string, error) {
 }
 
 func (fos *fileObjectStorage) read(name string) ([]byte, error) {
-	filename := path.Join(fos.baseDir, name)
+	filename := path.Join(fos.basedir, name)
 	return os.ReadFile(filename)
 }
 
-type datafileAction struct {
-	datafile string
+type dataobjectAction struct {
+	name string
 	table string
 }
 
@@ -146,11 +146,11 @@ type changeMetadataAction struct {
 
 // an enum, only one field will be non-nil
 type action struct {
-	addDatafile *datafileAction
+	addDataobject *dataobjectAction
 	changeMetadata *changeMetadataAction
 }
 
-const DATAFILE_SIZE uint = 64 * 1024
+const DATAOBJECT_SIZE uint = 64 * 1024
 type transaction struct {
 	id uint
 
@@ -162,36 +162,36 @@ type transaction struct {
 	tables map[string][]string
 
 	// Mapping table name to unflushed/in-memory rows. When rows
-	// are flushed, the datafile that contains them is added to
+	// are flushed, the dataobject that contains them is added to
 	// `tx.actions` above and `tx.unflushedDataPointer[table]` is
 	// reset to `0`.
-	unflushedData map[string][DATAFILE_SIZE][]any
+	unflushedData map[string][DATAOBJECT_SIZE][]any
 	unflushedDataPointer map[string]uint
 }
 
-type database struct {
+type client struct {
 	os objectStorage
 	tx *transaction
 }
 
-func newDatabase(os objectStorage) database {
-	return database{os, nil}
+func newClient(os objectStorage) client {
+	return client{os, nil}
 }
 
-func (d *database) getTxActions(txLogFilename string) ([]action, error) {
+func (d *client) getTxActions(txLogFilename string) ([]action, error) {
 	bytes, err := d.os.read(txLogFilename)
 	if err != nil {
 		return nil, err
 	}
 
-	var datafiles []action
-	err = json.Unmarshal(bytes, &datafiles)
-	return datafiles, err
+	var dataobjects []action
+	err = json.Unmarshal(bytes, &dataobjects)
+	return dataobjects, err
 }
 
 var errExistingTx = fmt.Errorf("Existing Transaction")
 
-func (d *database) newTx() error {
+func (d *client) newTx() error {
 	if d.tx != nil {
 		return errExistingTx
 	}
@@ -208,7 +208,10 @@ func (d *database) newTx() error {
 		return err
 	}
 
-	tx := &transaction{id: lastTxId + 1}
+	tx := &transaction{}
+	tx.id = uint(lastTxId) + 1
+	tx.previousActions = map[string][]action{}
+	tx.actions = map[string][]action{}
 
 	for _, txLog := range txLogs {
 		actions, err := d.getTxActions(txLog)
@@ -217,8 +220,8 @@ func (d *database) newTx() error {
 		}
 
 		for _, action := range actions {
-			if action.addDatafile != nil {
-				table := action.addDatafile.table
+			if action.addDataobject != nil {
+				table := action.addDataobject.table
 				tx.previousActions[table] = append(tx.previousActions[table], action)
 			} else if action.changeMetadata != nil {
 				mtd := action.changeMetadata
@@ -234,36 +237,10 @@ func (d *database) newTx() error {
 }
 
 var errNoTx = fmt.Errorf("No Transaction")
-
-func (d *database) readDatafile(df datafile) ([][]any, error) {
-	actions := append(, d.tx.actions[table]...)
-
-	var dfs []datafile
-	for _, previousDf := range d.tx.previousDatafiles {
-		dfBytes, err := d.os.read(fmt.Sprintf("_table_%s_%s", table, previousDf))
-		if err != nil {
-			return nil, err
-		}
-
-		var data [][]any
-		err = json.Unmarshal(dfBytes, &data)
-		if err != nil {
-			return nil, err
-		}
-
-		dfs = append(dfs, datafile{
-			name: previousDf,
-			data: data,
-		})
-	}
-
-	for _, df := range d.tx.previousDatafiles {
-
-	}
-}
-
 var errTableExists = fmt.Errorf("Table Exists")
-func (d *database) createTable(table string, columns []string) error {
+var errNoTable = fmt.Errorf("No Such Table")
+
+func (d *client) createTable(table string, columns []string) error {
 	if d.tx == nil {
 		return errNoTx
 	}
@@ -275,23 +252,24 @@ func (d *database) createTable(table string, columns []string) error {
 	d.tx.tables[table] = columns
 }
 
-type datafile struct {
-	datafileAction
+type dataobject struct {
+	table string
+	name string
 	data [][]any
 }
 
-func (d *database) flushRows(table string) error {
+func (d *client) flushRows(table string) error {
 	if d.tx == nil {
 		return errNoTx
 	}
 
-	// First write out datafile if there is anything to write out.
+	// First write out dataobject if there is anything to write out.
 	pointer, exists := d.tx.unflushedDataPointer[table]
 	if !exists || pointer == 0 {
 		return nil
 	}
 
-	df := datafile{
+	df := dataobject{
 		table: table,
 		name: uuidv4(),
 		data: d.tx.unflushedData[table][:pointer],
@@ -308,7 +286,7 @@ func (d *database) flushRows(table string) error {
 
 	// Record the newly written data file.
 	d.tx.actions = append(d.tx.actions, action{
-		addDatafile: &datafileAction{
+		addDataobject: &dataobjectAction{
 			table: table,
 			name: df.name,
 		},
@@ -319,20 +297,24 @@ func (d *database) flushRows(table string) error {
 	return nil
 }
 
-func (d *database) writeRow(table string, row []any) error {
+func (d *client) writeRow(table string, row []any) error {
 	if d.tx == nil {
 		return errNoTx
 	}
 
-	var df *datafile = nil
-	// Try to find an unflushed/in-memory datafile for this table
+	if _, ok := d.tx.tables[table]; !ok {
+		return errNoTable
+	}
+
+	var df *dataobject = nil
+	// Try to find an unflushed/in-memory dataobject for this table
 	pointer, ok := d.tx.unflushedDataPointer[table]
 	if !ok {
 		d.tx.unflushedDataPointer[table] = 0
-		d.tx.unflushedData[table] = [DATAFILE_SIZE][]any{}
+		d.tx.unflushedData[table] = [DATAOBJECT_SIZE][]any{}
 	}
 
-	if pointer == DATAFILE_SIZE {
+	if pointer == DATAOBJECT_SIZE {
 		d.flushRows(table)
 		pointer = 0
 	}
@@ -343,17 +325,95 @@ func (d *database) writeRow(table string, row []any) error {
 	return nil
 }
 
-func (d *database) scan(table string) error {
-	if d.tx == nil {
-		return errNoTx
-	}
+type scanIterator struct {
+	d *client
+	table string
 
-	// First check through unwritten datafiles
+	// First we iterate through unflushed rows.
+	unflushedRows [][]any
+	unflushedRowPointer uint
 
-	return nil
+	// Then we move through each dataobject.
+	dataobjects []string
+	dataobjectsPointer uint
+
+	// And within each dataobject we iterate through rows.
+	dataobject *dataobject
+	dataobjectRowPointer uint
 }
 
-func (d *database) commitTx() error {
+
+func (d *client) readDataobject(df dataobject) ([][]any, error) {
+	bytes, err := d.os.read(fmt.Sprintf("_table_%s_%s", table, previousDf))
+	if err != nil {
+		return nil, err
+	}
+
+	var do dataobject
+	err = json.Unmarshal(bytes, &do)
+	return do, err
+}
+
+// returns (nil, nil) when done
+func (si *scanIterator) next() ([]any, error) {
+	// Iterate through in-memory rows first.
+	if si.unflushedRowPointer < len(si.unflushedRows) {
+		row := si.unflushedRows[si.unflushedRowPointer]
+		si.unflushedRowPointer++
+		return row, nil
+	}
+
+	// If we've gotten through all dataobjects on disk we're done.
+	if si.dataobjectsPointer == len(si.dataobjects) {
+		return nil, nil
+	}
+
+	if si.dataobject == nil {
+		o, err := s.d.readDataobject(si.dataobjects[si.dataobjectsPointer])
+		if err != nil {
+			return nil, err
+		}
+
+		si.dataobject = o
+	}
+
+	if si.dataobjectRowPointer == len(s.dataobject.rows) {
+		si.dataobjectsPointer++
+		si.dataobject = nil
+		si.dataobjectRowPointer == 0
+		return si.next()
+	}
+
+	row := si.dataobject.rows[s.dataobjectsPointer]
+	s.dataobjectsPointer++
+	return row, nil
+}
+
+func (d *client) scan(table string) (*scanIterator, error) {
+	if d.tx == nil {
+		return nil, errNoTx
+	}
+
+	var dataobjects []dataobject
+	allActions := append(d.tx.previousActions, d.tx.actions)
+	for _, action := range allActions {
+		if action.addDataobject != nil {
+			dataobjects = append(dataobjects, dataobject{
+				table: table,
+				name: action.addDataobject.name,
+			})
+		}
+	}
+
+	return &scanIterator{
+		unflushedRows: unflushedRows,
+		d: d,
+		table: table,
+		dataobjects: dataobjects,
+	}, nil
+}
+
+func (d *client) commitTx() error {
 	if d.tx == nil {
 		return errNoTx
 	}

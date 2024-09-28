@@ -1,7 +1,7 @@
 # otf: A little open-table format implementation in Go
 
 ```
-$ go build
+$ go test
 ```
 
 See also:
