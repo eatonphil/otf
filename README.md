@@ -1,4 +1,4 @@
-# otf: A little open-table format implementation in Go
+# otf: A little Delta Lake/Iceberg inspired database implementation in Go
 
 ```
 $ go test
