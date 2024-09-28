@@ -147,28 +147,29 @@ func (fos *fileObjectStorage) read(name string) ([]byte, error) {
 }
 
 type DataobjectAction struct {
-	Name string
+	Name  string
 	Table string
 }
 
 type ChangeMetadataAction struct {
-	Table string
+	Table   string
 	Columns []string
 }
 
 // an enum, only one field will be non-nil
 type Action struct {
-	AddDataobject *DataobjectAction
+	AddDataobject  *DataobjectAction
 	ChangeMetadata *ChangeMetadataAction
 }
 
 const DATAOBJECT_SIZE int = 64 * 1024
+
 type transaction struct {
 	id int
 
 	// Both are mapping table name to a list of actions on the table.
 	previousActions map[string][]Action
-	Actions map[string][]Action
+	Actions         map[string][]Action
 
 	// Mapping tables to column names.
 	tables map[string][]string
@@ -177,7 +178,7 @@ type transaction struct {
 	// are flushed, the dataobject that contains them is added to
 	// `tx.actions` above and `tx.unflushedDataPointer[table]` is
 	// reset to `0`.
-	unflushedData map[string]*[DATAOBJECT_SIZE][]any
+	unflushedData        map[string]*[DATAOBJECT_SIZE][]any
 	unflushedDataPointer map[string]int
 }
 
@@ -274,7 +275,7 @@ func (d *client) createTable(table string, columns []string) error {
 	// And also add it to the action history for future transactions.
 	d.tx.Actions[table] = append(d.tx.Actions[table], Action{
 		ChangeMetadata: &ChangeMetadataAction{
-			Table: table,
+			Table:   table,
 			Columns: columns,
 		},
 	})
@@ -284,9 +285,9 @@ func (d *client) createTable(table string, columns []string) error {
 
 type dataobject struct {
 	Table string
-	Name string
-	Data [DATAOBJECT_SIZE][]any
-	Len int
+	Name  string
+	Data  [DATAOBJECT_SIZE][]any
+	Len   int
 }
 
 func (d *client) flushRows(table string) error {
@@ -302,9 +303,9 @@ func (d *client) flushRows(table string) error {
 
 	df := dataobject{
 		Table: table,
-		Name: uuidv4(),
-		Data: *d.tx.unflushedData[table],
-		Len: pointer,
+		Name:  uuidv4(),
+		Data:  *d.tx.unflushedData[table],
+		Len:   pointer,
 	}
 	bytes, err := json.Marshal(df)
 	if err != nil {
@@ -321,7 +322,7 @@ func (d *client) flushRows(table string) error {
 	d.tx.Actions[table] = append(d.tx.Actions[table], Action{
 		AddDataobject: &DataobjectAction{
 			Table: table,
-			Name: df.Name,
+			Name:  df.Name,
 		},
 	})
 
@@ -357,23 +358,22 @@ func (d *client) writeRow(table string, row []any) error {
 }
 
 type scanIterator struct {
-	d *client
+	d     *client
 	table string
 
 	// First we iterate through unflushed rows.
-	unflushedRows [DATAOBJECT_SIZE][]any
-	unflushedRowsLen int
+	unflushedRows       [DATAOBJECT_SIZE][]any
+	unflushedRowsLen    int
 	unflushedRowPointer int
 
 	// Then we move through each dataobject.
-	dataobjects []string
+	dataobjects        []string
 	dataobjectsPointer int
 
 	// And within each dataobject we iterate through rows.
-	dataobject *dataobject
+	dataobject           *dataobject
 	dataobjectRowPointer int
 }
-
 
 func (d *client) readDataobject(table, name string) (*dataobject, error) {
 	bytes, err := d.os.read(fmt.Sprintf("_table_%s_%s", table, name))
@@ -445,11 +445,11 @@ func (d *client) scan(table string) (*scanIterator, error) {
 	}
 
 	return &scanIterator{
-		unflushedRows: unflushedRows,
+		unflushedRows:    unflushedRows,
 		unflushedRowsLen: d.tx.unflushedDataPointer[table],
-		d: d,
-		table: table,
-		dataobjects: dataobjects,
+		d:                d,
+		table:            table,
+		dataobjects:      dataobjects,
 	}, nil
 }
 

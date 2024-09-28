@@ -11,7 +11,9 @@ func TestConcurrentTableWriter(t *testing.T) {
 func TestConcurrentReaderWithWriterReadsSnapshot(t *testing.T) {
 	dir, err := os.MkdirTemp("", "test-database")
 
-	if err != nil { panic(err) }
+	if err != nil {
+		panic(err)
+	}
 
 	defer os.Remove(dir)
 
@@ -68,7 +70,7 @@ func TestConcurrentReaderWithWriterReadsSnapshot(t *testing.T) {
 		debug("Got row in reader tx")
 		if seen == 0 {
 			assertEq(row[0], "Joey", "row mismatch in c1")
-			assertEq(row[1], 1.0, "row mismatch in c1")			
+			assertEq(row[1], 1.0, "row mismatch in c1")
 		} else {
 			assertEq(row[0], "Yue", "row mismatch in c1")
 			assertEq(row[1], 2.0, "row mismatch in c1")
@@ -96,7 +98,7 @@ func TestConcurrentReaderWithWriterReadsSnapshot(t *testing.T) {
 			assertEq(row[1], 3, "row mismatch in c1")
 		} else if seen == 1 {
 			assertEq(row[0], "Joey", "row mismatch in c1")
-			assertEq(row[1], 1.0, "row mismatch in c1")			
+			assertEq(row[1], 1.0, "row mismatch in c1")
 		} else {
 			assertEq(row[0], "Yue", "row mismatch in c1")
 			assertEq(row[1], 2.0, "row mismatch in c1")
