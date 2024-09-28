@@ -1,7 +1,13 @@
 package main
 
-import "os"
-import "path"
+import (
+	"fmt"
+	"io"
+	"os"
+	"path"
+	"strconv"
+	"strings"
+)
 
 type objectStorage interface {
 	putIfAbsent(name string, bytes []byte) error
@@ -14,7 +20,7 @@ type fileObjectStorage struct {
 }
 
 func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
-	filename = path.Join(fos.baseDir, name)
+	filename := path.Join(fos.baseDir, name)
 	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_EXCL|os.O_CREATE, 0644)
 	if err != nil {
 		return err
@@ -22,8 +28,8 @@ func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
 
 	written := 0
 	bufSize := 1024 * 16
-	for written < bytes {
-		toWrite := min(written + bufSize, len(bytes)-1)
+	for written < len(bytes) {
+		toWrite := min(written+bufSize, len(bytes)-1)
 		n, err := f.Write(bytes[written:toWrite])
 		if err != nil {
 			removeErr := os.Remove(filename)
@@ -37,9 +43,9 @@ func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
 		written += n
 	}
 
-	err = fs.Close()
+	err = f.Close()
 	if err != nil {
-		removeErr = os.Remove(filename)
+		removeErr := os.Remove(filename)
 		if removeErr != nil {
 			panic(removeErr)
 		}
@@ -54,15 +60,15 @@ func (fos *fileObjectStorage) listPrefix(prefix string) ([]string, error) {
 	dir := path.Join(fos.baseDir)
 	f, err := os.Open(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var files []string
-	var err error
-	for err != os.EOF {
-		names, err := f.Readdirnames(100)
-		if err != nil && err != os.EOF {
-			return err
+	for err != io.EOF {
+		var names []string
+		names, err = f.Readdirnames(100)
+		if err != nil && err != io.EOF {
+			return nil, err
 		}
 
 		for _, n := range names {
@@ -76,7 +82,7 @@ func (fos *fileObjectStorage) listPrefix(prefix string) ([]string, error) {
 }
 
 func (fos *fileObjectStorage) read(name string) ([]byte, error) {
-	filename = path.Join(fos.baseDir, name)
+	filename := path.Join(fos.baseDir, name)
 	return os.ReadFile(filename)
 }
 
@@ -94,13 +100,14 @@ func newDatabase(os objectStorage) database {
 }
 
 var errExistingTransaction = fmt.Errorf("Existing Transaction")
+
 func (d *database) newTransaction() error {
 	if d.tx != nil {
 		return errExistingTransaction
 	}
 
 	logPrefix := "_log_"
-	transactionLogs, err := os.listPrefix(logPrefix)
+	transactionLogs, err := d.os.listPrefix(logPrefix)
 	if err != nil {
 		return err
 	}
@@ -111,14 +118,18 @@ func (d *database) newTransaction() error {
 		return err
 	}
 
-	d.tx = &transaction{lastTxId+1}
+	d.tx = &transaction{lastTxId + 1}
+	return nil
 }
 
 var errNoTransaction = fmt.Errorf("No Transaction")
+
 func (d *database) writeRow(table string, row []any) error {
 	if d.tx == nil {
 		return errNoTransaction
 	}
+
+	return nil
 }
 
 func (d *database) commitTransaction() error {
@@ -127,5 +138,8 @@ func (d *database) commitTransaction() error {
 	}
 
 	filename := fmt.Sprintf("_log_%020d", d.tx.id)
+	var txData []byte
 	return d.os.putIfAbsent(filename, txData)
 }
+
+func main() {}
