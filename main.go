@@ -312,7 +312,6 @@ func (d *client) flushRows(table string) error {
 		return err
 	}
 
-	debug("Writing dataobject", pointer)
 	err = d.os.putIfAbsent(fmt.Sprintf("_table_%s_%s", table, df.Name), bytes)
 	if err != nil {
 		return err
@@ -397,7 +396,6 @@ func (si *scanIterator) next() ([]any, error) {
 
 	// If we've gotten through all dataobjects on disk we're done.
 	if si.dataobjectsPointer == len(si.dataobjects) {
-		debug("Done scanning disk")
 		return nil, nil
 	}
 
@@ -409,19 +407,16 @@ func (si *scanIterator) next() ([]any, error) {
 		}
 
 		si.dataobject = o
-		debug("Read dataobject", si.dataobject.Len, si.dataobjectRowPointer)
 	}
 
 	if si.dataobjectRowPointer > si.dataobject.Len {
 		si.dataobjectsPointer++
 		si.dataobject = nil
 		si.dataobjectRowPointer = 0
-		debug("Done scanning dataobject")
 		return si.next()
 	}
 
 	row := si.dataobject.Data[si.dataobjectRowPointer]
-	debug("Scanning dataobject row", row)
 	si.dataobjectRowPointer++
 	return row, nil
 }

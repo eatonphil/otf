@@ -21,34 +21,36 @@ func TestConcurrentTableWriters(t *testing.T) {
 	// Have c2Writer start up a transaction.
 	err = c2Writer.newTx()
 	assertEq(err, nil, "could not start first c2 tx")
+	debug("[c2] new tx")
 
 	// But then have c1Writer start a transaction and commit it first.
 	err = c1Writer.newTx()
 	assertEq(err, nil, "could not start first c1 tx")
+	debug("[c1] new tx")
 	err = c1Writer.createTable("x", []string{"a", "b"})
 	assertEq(err, nil, "could not create x")
-	debug("Created table")
+	debug("[c1] Created table")
 	err = c1Writer.writeRow("x", []any{"Joey", 1})
 	assertEq(err, nil, "could not write first row")
-	debug("Wrote row")
+	debug("[c1] Wrote row")
 	err = c1Writer.writeRow("x", []any{"Yue", 2})
 	assertEq(err, nil, "could not write second row")
-	debug("Wrote row")
+	debug("[c1] Wrote row")
 	err = c1Writer.commitTx()
 	assertEq(err, nil, "could not commit tx")
-	debug("Committed tx")
+	debug("[c1] Committed tx")
 
 	// Now go back to c2 and write data.
 	err = c2Writer.createTable("x", []string{"a", "b"})
 	assertEq(err, nil, "could not create x")
-	debug("Created table")
+	debug("[c2] Created table")
 	err = c2Writer.writeRow("x", []any{"Holly", 1})
 	assertEq(err, nil, "could not write first row")
-	debug("Wrote row")
+	debug("[c2] Wrote row")
 
 	err = c2Writer.commitTx()
 	assert(err != nil, "concurrent commit must fail")
-	debug("c2 tx not committed")
+	debug("[c2] tx not committed")
 
 }
 
