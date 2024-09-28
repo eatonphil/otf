@@ -1,5 +1,8 @@
 # otf: A little Delta Lake/Iceberg inspired database implementation in Go
 
+Only supports CREATE TABLE, INSERTs and SELECTs at the moment. Take a
+look at the tests for examples of usage and concurrency control.
+
 ```
 $ go test
 ```
