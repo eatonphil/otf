@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -20,6 +21,17 @@ func assertEq[C comparable](a C, b C, prefix string) {
 	if a != b {
 		panic(fmt.Sprintf("%s '%v' != '%v'", prefix, a, b))
 	}
+}
+
+var DEBUG = slices.Contains(os.Args, "--debug")
+
+func debug(a ...any) {
+	if !DEBUG {
+		return
+	}
+
+	args := append([]any{"[DEBUG]"}, a...)
+	fmt.Println(args...)
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
@@ -76,7 +88,7 @@ func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
 	written := 0
 	bufSize := 1024 * 16
 	for written < len(bytes) {
-		toWrite := min(written+bufSize, len(bytes)-1)
+		toWrite := min(written+bufSize, len(bytes))
 		n, err := f.Write(bytes[written:toWrite])
 		if err != nil {
 			removeErr := os.Remove(filename)
@@ -134,29 +146,29 @@ func (fos *fileObjectStorage) read(name string) ([]byte, error) {
 	return os.ReadFile(filename)
 }
 
-type dataobjectAction struct {
-	name string
-	table string
+type DataobjectAction struct {
+	Name string
+	Table string
 }
 
-type changeMetadataAction struct {
-	table string
-	columns []string
+type ChangeMetadataAction struct {
+	Table string
+	Columns []string
 }
 
 // an enum, only one field will be non-nil
-type action struct {
-	addDataobject *dataobjectAction
-	changeMetadata *changeMetadataAction
+type Action struct {
+	AddDataobject *DataobjectAction
+	ChangeMetadata *ChangeMetadataAction
 }
 
-const DATAOBJECT_SIZE uint = 64 * 1024
+const DATAOBJECT_SIZE int = 64 * 1024
 type transaction struct {
-	id uint
+	id int
 
 	// Both are mapping table name to a list of actions on the table.
-	previousActions map[string][]action
-	actions map[string][]action
+	previousActions map[string][]Action
+	Actions map[string][]Action
 
 	// Mapping tables to column names.
 	tables map[string][]string
@@ -165,8 +177,8 @@ type transaction struct {
 	// are flushed, the dataobject that contains them is added to
 	// `tx.actions` above and `tx.unflushedDataPointer[table]` is
 	// reset to `0`.
-	unflushedData map[string][DATAOBJECT_SIZE][]any
-	unflushedDataPointer map[string]uint
+	unflushedData map[string]*[DATAOBJECT_SIZE][]any
+	unflushedDataPointer map[string]int
 }
 
 type client struct {
@@ -178,18 +190,18 @@ func newClient(os objectStorage) client {
 	return client{os, nil}
 }
 
-func (d *client) getTxActions(txLogFilename string) ([]action, error) {
+func (d *client) getTxActions(txLogFilename string) (map[string][]Action, error) {
 	bytes, err := d.os.read(txLogFilename)
 	if err != nil {
 		return nil, err
 	}
 
-	var dataobjects []action
-	err = json.Unmarshal(bytes, &dataobjects)
-	return dataobjects, err
+	var tx transaction
+	err = json.Unmarshal(bytes, &tx)
+	return tx.Actions, err
 }
 
-var errExistingTx = fmt.Errorf("Existing Transaction")
+var errExistingTx = fmt.Errorf("Existing transaction")
 
 func (d *client) newTx() error {
 	if d.tx != nil {
@@ -202,16 +214,22 @@ func (d *client) newTx() error {
 		return err
 	}
 
-	lastTxIdString := txLogs[len(txLogs)-1][len(logPrefix):]
-	lastTxId, err := strconv.ParseUint(lastTxIdString, 10, 64)
-	if err != nil {
-		return err
+	var lastTxId = 0
+	if len(txLogs) > 0 {
+		lastTxIdString := txLogs[len(txLogs)-1][len(logPrefix):]
+		lastTxId, err = strconv.Atoi(lastTxIdString)
+		if err != nil {
+			return err
+		}
 	}
 
 	tx := &transaction{}
-	tx.id = uint(lastTxId) + 1
-	tx.previousActions = map[string][]action{}
-	tx.actions = map[string][]action{}
+	tx.id = lastTxId + 1
+	tx.previousActions = map[string][]Action{}
+	tx.Actions = map[string][]Action{}
+	tx.tables = map[string][]string{}
+	tx.unflushedData = map[string]*[DATAOBJECT_SIZE][]any{}
+	tx.unflushedDataPointer = map[string]int{}
 
 	for _, txLog := range txLogs {
 		actions, err := d.getTxActions(txLog)
@@ -219,15 +237,16 @@ func (d *client) newTx() error {
 			return err
 		}
 
-		for _, action := range actions {
-			if action.addDataobject != nil {
-				table := action.addDataobject.table
-				tx.previousActions[table] = append(tx.previousActions[table], action)
-			} else if action.changeMetadata != nil {
-				mtd := action.changeMetadata
-				tx.tables[mtd.table] = mtd.columns
-			} else {
-				panic(fmt.Sprintf("unsupported action: %v", action))
+		for table, actions := range actions {
+			for _, action := range actions {
+				if action.AddDataobject != nil {
+					tx.previousActions[table] = append(tx.previousActions[table], action)
+				} else if action.ChangeMetadata != nil {
+					mtd := action.ChangeMetadata
+					tx.tables[table] = mtd.Columns
+				} else {
+					panic(fmt.Sprintf("unsupported action: %v", action))
+				}
 			}
 		}
 	}
@@ -236,7 +255,7 @@ func (d *client) newTx() error {
 	return nil
 }
 
-var errNoTx = fmt.Errorf("No Transaction")
+var errNoTx = fmt.Errorf("No transaction")
 var errTableExists = fmt.Errorf("Table Exists")
 var errNoTable = fmt.Errorf("No Such Table")
 
@@ -249,13 +268,25 @@ func (d *client) createTable(table string, columns []string) error {
 		return errTableExists
 	}
 
+	// Store it in the in-memory mapping.
 	d.tx.tables[table] = columns
+
+	// And also add it to the action history for future transactions.
+	d.tx.Actions[table] = append(d.tx.Actions[table], Action{
+		ChangeMetadata: &ChangeMetadataAction{
+			Table: table,
+			Columns: columns,
+		},
+	})
+
+	return nil
 }
 
 type dataobject struct {
-	table string
-	name string
-	data [][]any
+	Table string
+	Name string
+	Data [DATAOBJECT_SIZE][]any
+	Len int
 }
 
 func (d *client) flushRows(table string) error {
@@ -270,25 +301,27 @@ func (d *client) flushRows(table string) error {
 	}
 
 	df := dataobject{
-		table: table,
-		name: uuidv4(),
-		data: d.tx.unflushedData[table][:pointer],
+		Table: table,
+		Name: uuidv4(),
+		Data: *d.tx.unflushedData[table],
+		Len: pointer,
 	}
 	bytes, err := json.Marshal(df)
 	if err != nil {
 		return err
 	}
 
-	err := d.os.putIfAbsent(df.name, bytes)
+	debug("Writing dataobject", pointer)
+	err = d.os.putIfAbsent(fmt.Sprintf("_table_%s_%s", table, df.Name), bytes)
 	if err != nil {
 		return err
 	}
 
 	// Record the newly written data file.
-	d.tx.actions = append(d.tx.actions, action{
-		addDataobject: &dataobjectAction{
-			table: table,
-			name: df.name,
+	d.tx.Actions[table] = append(d.tx.Actions[table], Action{
+		AddDataobject: &DataobjectAction{
+			Table: table,
+			Name: df.Name,
 		},
 	})
 
@@ -306,12 +339,11 @@ func (d *client) writeRow(table string, row []any) error {
 		return errNoTable
 	}
 
-	var df *dataobject = nil
 	// Try to find an unflushed/in-memory dataobject for this table
 	pointer, ok := d.tx.unflushedDataPointer[table]
 	if !ok {
 		d.tx.unflushedDataPointer[table] = 0
-		d.tx.unflushedData[table] = [DATAOBJECT_SIZE][]any{}
+		d.tx.unflushedData[table] = &[DATAOBJECT_SIZE][]any{}
 	}
 
 	if pointer == DATAOBJECT_SIZE {
@@ -321,7 +353,6 @@ func (d *client) writeRow(table string, row []any) error {
 
 	d.tx.unflushedData[table][pointer] = row
 	d.tx.unflushedDataPointer[table]++
-
 	return nil
 }
 
@@ -330,34 +361,35 @@ type scanIterator struct {
 	table string
 
 	// First we iterate through unflushed rows.
-	unflushedRows [][]any
-	unflushedRowPointer uint
+	unflushedRows [DATAOBJECT_SIZE][]any
+	unflushedRowsLen int
+	unflushedRowPointer int
 
 	// Then we move through each dataobject.
 	dataobjects []string
-	dataobjectsPointer uint
+	dataobjectsPointer int
 
 	// And within each dataobject we iterate through rows.
 	dataobject *dataobject
-	dataobjectRowPointer uint
+	dataobjectRowPointer int
 }
 
 
-func (d *client) readDataobject(df dataobject) ([][]any, error) {
-	bytes, err := d.os.read(fmt.Sprintf("_table_%s_%s", table, previousDf))
+func (d *client) readDataobject(table, name string) (*dataobject, error) {
+	bytes, err := d.os.read(fmt.Sprintf("_table_%s_%s", table, name))
 	if err != nil {
 		return nil, err
 	}
 
 	var do dataobject
 	err = json.Unmarshal(bytes, &do)
-	return do, err
+	return &do, err
 }
 
 // returns (nil, nil) when done
 func (si *scanIterator) next() ([]any, error) {
 	// Iterate through in-memory rows first.
-	if si.unflushedRowPointer < len(si.unflushedRows) {
+	if si.unflushedRowPointer < si.unflushedRowsLen {
 		row := si.unflushedRows[si.unflushedRowPointer]
 		si.unflushedRowPointer++
 		return row, nil
@@ -365,27 +397,32 @@ func (si *scanIterator) next() ([]any, error) {
 
 	// If we've gotten through all dataobjects on disk we're done.
 	if si.dataobjectsPointer == len(si.dataobjects) {
+		debug("Done scanning disk")
 		return nil, nil
 	}
 
 	if si.dataobject == nil {
-		o, err := s.d.readDataobject(si.dataobjects[si.dataobjectsPointer])
+		name := si.dataobjects[si.dataobjectsPointer]
+		o, err := si.d.readDataobject(si.table, name)
 		if err != nil {
 			return nil, err
 		}
 
 		si.dataobject = o
+		debug("Read dataobject", si.dataobject.Len, si.dataobjectRowPointer)
 	}
 
-	if si.dataobjectRowPointer == len(s.dataobject.rows) {
+	if si.dataobjectRowPointer > si.dataobject.Len {
 		si.dataobjectsPointer++
 		si.dataobject = nil
-		si.dataobjectRowPointer == 0
+		si.dataobjectRowPointer = 0
+		debug("Done scanning dataobject")
 		return si.next()
 	}
 
-	row := si.dataobject.rows[s.dataobjectsPointer]
-	s.dataobjectsPointer++
+	row := si.dataobject.Data[si.dataobjectRowPointer]
+	debug("Scanning dataobject row", row)
+	si.dataobjectRowPointer++
 	return row, nil
 }
 
@@ -394,19 +431,22 @@ func (d *client) scan(table string) (*scanIterator, error) {
 		return nil, errNoTx
 	}
 
-	var dataobjects []dataobject
-	allActions := append(d.tx.previousActions, d.tx.actions)
+	var dataobjects []string
+	allActions := append(d.tx.previousActions[table], d.tx.Actions[table]...)
 	for _, action := range allActions {
-		if action.addDataobject != nil {
-			dataobjects = append(dataobjects, dataobject{
-				table: table,
-				name: action.addDataobject.name,
-			})
+		if action.AddDataobject != nil {
+			dataobjects = append(dataobjects, action.AddDataobject.Name)
 		}
+	}
+
+	var unflushedRows [DATAOBJECT_SIZE][]any
+	if data, ok := d.tx.unflushedData[table]; ok {
+		unflushedRows = *data
 	}
 
 	return &scanIterator{
 		unflushedRows: unflushedRows,
+		unflushedRowsLen: d.tx.unflushedDataPointer[table],
 		d: d,
 		table: table,
 		dataobjects: dataobjects,
@@ -418,14 +458,41 @@ func (d *client) commitTx() error {
 		return errNoTx
 	}
 
+	// Flush any outstanding data
+	for table := range d.tx.tables {
+		err := d.flushRows(table)
+		if err != nil {
+			return err
+		}
+	}
+
+	wrote := false
+	for _, actions := range d.tx.Actions {
+		if len(actions) > 0 {
+			wrote = true
+			break
+		}
+	}
+	// Read-only transaction, no need to do a concurrency check.
+	if !wrote {
+		return nil
+	}
+
 	filename := fmt.Sprintf("_log_%020d", d.tx.id)
-	tx.previousActions = nil
-	bytes, err := json.Marshal(tx)
+	// We won't store previous actions, they will be recovered on
+	// new transactions. So unset them. Honestly not totally
+	// clear why.
+	d.tx.previousActions = nil
+	bytes, err := json.Marshal(d.tx)
 	if err != nil {
 		return err
 	}
 
-	return d.os.putIfAbsent(filename, bytes)
+	err = d.os.putIfAbsent(filename, bytes)
+	d.tx = nil
+	return err
 }
 
-func main() {}
+func main() {
+	panic("unimplemented")
+}
