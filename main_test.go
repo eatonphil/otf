@@ -5,7 +5,51 @@ import (
 	"testing"
 )
 
-func TestConcurrentTableWriter(t *testing.T) {
+func TestConcurrentTableWriters(t *testing.T) {
+	dir, err := os.MkdirTemp("", "test-database")
+
+	if err != nil {
+		panic(err)
+	}
+
+	defer os.Remove(dir)
+
+	fos := newFileObjectStorage(dir)
+	c1Writer := newClient(fos)
+	c2Writer := newClient(fos)
+
+	// Have c2Writer start up a transaction.
+	err = c2Writer.newTx()
+	assertEq(err, nil, "could not start first c2 tx")
+
+	// But then have c1Writer start a transaction and commit it first.
+	err = c1Writer.newTx()
+	assertEq(err, nil, "could not start first c1 tx")
+	err = c1Writer.createTable("x", []string{"a", "b"})
+	assertEq(err, nil, "could not create x")
+	debug("Created table")
+	err = c1Writer.writeRow("x", []any{"Joey", 1})
+	assertEq(err, nil, "could not write first row")
+	debug("Wrote row")
+	err = c1Writer.writeRow("x", []any{"Yue", 2})
+	assertEq(err, nil, "could not write second row")
+	debug("Wrote row")
+	err = c1Writer.commitTx()
+	assertEq(err, nil, "could not commit tx")
+	debug("Committed tx")
+
+	// Now go back to c2 and write data.
+	err = c2Writer.createTable("x", []string{"a", "b"})
+	assertEq(err, nil, "could not create x")
+	debug("Created table")
+	err = c2Writer.writeRow("x", []any{"Holly", 1})
+	assertEq(err, nil, "could not write first row")
+	debug("Wrote row")
+
+	err = c2Writer.commitTx()
+	assert(err != nil, "concurrent commit must fail")
+	debug("c2 tx not committed")
+
 }
 
 func TestConcurrentReaderWithWriterReadsSnapshot(t *testing.T) {
