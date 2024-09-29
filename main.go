@@ -65,6 +65,7 @@ func uuidv4() string {
 }
 
 type objectStorage interface {
+	// Must be atomic
 	putIfAbsent(name string, bytes []byte) error
 	listPrefix(prefix string) ([]string, error)
 	read(name string) ([]byte, error)
@@ -184,12 +185,22 @@ type transaction struct {
 
 type client struct {
 	os objectStorage
+	// Current transaction, if any. Only one transaction per
+	// client at a time. All reads and writes must be within a
+	// transaction.
 	tx *transaction
 }
 
 func newClient(os objectStorage) client {
 	return client{os, nil}
 }
+
+var (
+	errExistingTx  = fmt.Errorf("Existing Transaction")
+	errNoTx        = fmt.Errorf("No Transaction")
+	errTableExists = fmt.Errorf("Table Exists")
+	errNoTable     = fmt.Errorf("No Such Table")
+)
 
 func (d *client) getTxActions(txLogFilename string) (map[string][]Action, error) {
 	bytes, err := d.os.read(txLogFilename)
@@ -201,8 +212,6 @@ func (d *client) getTxActions(txLogFilename string) (map[string][]Action, error)
 	err = json.Unmarshal(bytes, &tx)
 	return tx.Actions, err
 }
-
-var errExistingTx = fmt.Errorf("Existing transaction")
 
 func (d *client) newTx() error {
 	if d.tx != nil {
@@ -255,10 +264,6 @@ func (d *client) newTx() error {
 	d.tx = tx
 	return nil
 }
-
-var errNoTx = fmt.Errorf("No transaction")
-var errTableExists = fmt.Errorf("Table Exists")
-var errNoTable = fmt.Errorf("No Such Table")
 
 func (d *client) createTable(table string, columns []string) error {
 	if d.tx == nil {
