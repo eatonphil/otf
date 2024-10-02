@@ -51,7 +51,6 @@ func TestConcurrentTableWriters(t *testing.T) {
 	err = c2Writer.commitTx()
 	assert(err != nil, "concurrent commit must fail")
 	debug("[c2] tx not committed")
-
 }
 
 func TestConcurrentReaderWithWriterReadsSnapshot(t *testing.T) {
@@ -70,50 +69,51 @@ func TestConcurrentReaderWithWriterReadsSnapshot(t *testing.T) {
 	// First create some data and commit the transaction.
 	err = c1Writer.newTx()
 	assertEq(err, nil, "could not start first c1 tx")
+	debug("[c1Writer] Started tx")
 	err = c1Writer.createTable("x", []string{"a", "b"})
 	assertEq(err, nil, "could not create x")
-	debug("Created table")
+	debug("[c1Writer] Created table")
 	err = c1Writer.writeRow("x", []any{"Joey", 1})
 	assertEq(err, nil, "could not write first row")
-	debug("Wrote row")
+	debug("[c1Writer] Wrote row")
 	err = c1Writer.writeRow("x", []any{"Yue", 2})
 	assertEq(err, nil, "could not write second row")
-	debug("Wrote row")
+	debug("[c1Writer] Wrote row")
 	err = c1Writer.commitTx()
 	assertEq(err, nil, "could not commit tx")
-	debug("Committed tx")
+	debug("[c1Writer] Committed tx")
 
 	// Now start a new transaction for more edits.
 	err = c1Writer.newTx()
 	assertEq(err, nil, "could not start second c1 tx")
-	debug("Starting new write tx")
+	debug("[c1Writer] Starting new write tx")
 
 	// Before we commit this second write-transaction, start a
 	// read transaction.
 	err = c2Reader.newTx()
 	assertEq(err, nil, "could not start c2 tx")
-	debug("Starting new read tx")
+	debug("[c2Reader] Started tx")
 
 	// Write and commit rows in c1.
 	err = c1Writer.writeRow("x", []any{"Ada", 3})
 	assertEq(err, nil, "could not write third row")
-	debug("Wrote third row")
+	debug("[c1Writer] Wrote third row")
 
 	// Scan x in read-only transaction
 	it, err := c2Reader.scan("x")
 	assertEq(err, nil, "could not scan x")
-	debug("Started scanning in reader tx")
+	debug("[c2Reader] Started scanning")
 	seen := 0
 	for {
 		row, err := it.next()
 		assertEq(err, nil, "could not iterate x scan")
 
 		if row == nil {
-			debug("Done scanning in reader tx")
+			debug("[c2Reader] Done scanning")
 			break
 		}
 
-		debug("Got row in reader tx")
+		debug("[c2Reader] Got row in reader tx", row)
 		if seen == 0 {
 			assertEq(row[0], "Joey", "row mismatch in c1")
 			assertEq(row[1], 1.0, "row mismatch in c1")
@@ -129,14 +129,18 @@ func TestConcurrentReaderWithWriterReadsSnapshot(t *testing.T) {
 	// Scan x in c1 write transaction
 	it, err = c1Writer.scan("x")
 	assertEq(err, nil, "could not scan x in c1")
+	debug("[c1Writer] Started scanning")
 	seen = 0
 	for {
 		row, err := it.next()
 		assertEq(err, nil, "could not iterate x scan in c1")
 
 		if row == nil {
+			debug("[c1Writer] Done scanning")
 			break
 		}
+
+		debug("[c1Writer] Got row in tx", row)
 
 		if seen == 0 {
 			assertEq(row[0], "Ada", "row mismatch in c1")
@@ -157,8 +161,10 @@ func TestConcurrentReaderWithWriterReadsSnapshot(t *testing.T) {
 	// Writer committing should succeed.
 	err = c1Writer.commitTx()
 	assertEq(err, nil, "could not commit second tx")
+	debug("[c1Writer] Committed tx")
 
 	// Reader committing should succeed.
 	err = c2Reader.commitTx()
 	assertEq(err, nil, "could not commit read-only tx")
+	debug("[c2Reader] Committed tx")
 }

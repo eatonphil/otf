@@ -7,7 +7,6 @@ import (
 	"os"
 	"path"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -80,8 +79,8 @@ func newFileObjectStorage(basedir string) *fileObjectStorage {
 }
 
 func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
-	filename := path.Join(fos.basedir, name)
-	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_EXCL|os.O_CREATE, 0644)
+	tmpfilename := path.Join(fos.basedir, uuidv4())
+	f, err := os.OpenFile(tmpfilename, os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
 		return err
 	}
@@ -92,7 +91,7 @@ func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
 		toWrite := min(written+bufSize, len(bytes))
 		n, err := f.Write(bytes[written:toWrite])
 		if err != nil {
-			removeErr := os.Remove(filename)
+			removeErr := os.Remove(tmpfilename)
 			assert(removeErr == nil, "could not remove")
 			return err
 		}
@@ -102,19 +101,20 @@ func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
 
 	err = f.Sync()
 	if err != nil {
-		removeErr := os.Remove(filename)
+		removeErr := os.Remove(tmpfilename)
 		assert(removeErr == nil, "could not remove")
 		return err
 	}
 
 	err = f.Close()
 	if err != nil {
-		removeErr := os.Remove(filename)
+		removeErr := os.Remove(tmpfilename)
 		assert(removeErr == nil, "could not remove")
 		return err
 	}
 
-	return nil
+	filename := path.Join(fos.basedir, name)
+	return os.Link(tmpfilename, filename)
 }
 
 func (fos *fileObjectStorage) listPrefix(prefix string) ([]string, error) {
@@ -161,12 +161,14 @@ type ChangeMetadataAction struct {
 type Action struct {
 	AddDataobject  *DataobjectAction
 	ChangeMetadata *ChangeMetadataAction
+	// TODO: Support object removal.
+	// DeleteDataobject *DataobjectAction
 }
 
 const DATAOBJECT_SIZE int = 64 * 1024
 
 type transaction struct {
-	id int
+	Id int
 
 	// Both are mapping table name to a list of actions on the table.
 	previousActions map[string][]Action
@@ -202,56 +204,51 @@ var (
 	errNoTable     = fmt.Errorf("No Such Table")
 )
 
-func (d *client) getTxActions(txLogFilename string) (map[string][]Action, error) {
-	bytes, err := d.os.read(txLogFilename)
-	if err != nil {
-		return nil, err
-	}
-
-	var tx transaction
-	err = json.Unmarshal(bytes, &tx)
-	return tx.Actions, err
-}
-
 func (d *client) newTx() error {
 	if d.tx != nil {
 		return errExistingTx
 	}
 
 	logPrefix := "_log_"
-	txLogs, err := d.os.listPrefix(logPrefix)
+	txLogFilenames, err := d.os.listPrefix(logPrefix)
 	if err != nil {
 		return err
 	}
 
-	var lastTxId = 0
-	if len(txLogs) > 0 {
-		lastTxIdString := txLogs[len(txLogs)-1][len(logPrefix):]
-		lastTxId, err = strconv.Atoi(lastTxIdString)
-		if err != nil {
-			return err
-		}
-	}
-
 	tx := &transaction{}
-	tx.id = lastTxId + 1
 	tx.previousActions = map[string][]Action{}
 	tx.Actions = map[string][]Action{}
 	tx.tables = map[string][]string{}
 	tx.unflushedData = map[string]*[DATAOBJECT_SIZE][]any{}
 	tx.unflushedDataPointer = map[string]int{}
 
-	for _, txLog := range txLogs {
-		actions, err := d.getTxActions(txLog)
+	for _, txLogFilename := range txLogFilenames {
+		bytes, err := d.os.read(txLogFilename)
 		if err != nil {
 			return err
 		}
 
-		for table, actions := range actions {
+		var oldTx transaction
+		err = json.Unmarshal(bytes, &oldTx)
+		if err != nil {
+			return err
+		}
+		// Transaction metadata files are sorted
+		// lexicographically so that the most recent
+		// transaction (i.e. the one with the largest
+		// transaction id) will be last and tx.Id will end up
+		// 1 greater than the most recent transaction ID we
+		// see on disk.
+		tx.Id = oldTx.Id + 1
+
+		for table, actions := range oldTx.Actions {
 			for _, action := range actions {
 				if action.AddDataobject != nil {
 					tx.previousActions[table] = append(tx.previousActions[table], action)
 				} else if action.ChangeMetadata != nil {
+					// Store the latest version of
+					// each table in memory for
+					// easy lookup.
 					mtd := action.ChangeMetadata
 					tx.tables[table] = mtd.Columns
 				} else {
@@ -285,6 +282,32 @@ func (d *client) createTable(table string, columns []string) error {
 		},
 	})
 
+	return nil
+}
+
+func (d *client) writeRow(table string, row []any) error {
+	if d.tx == nil {
+		return errNoTx
+	}
+
+	if _, ok := d.tx.tables[table]; !ok {
+		return errNoTable
+	}
+
+	// Try to find an unflushed/in-memory dataobject for this table
+	pointer, ok := d.tx.unflushedDataPointer[table]
+	if !ok {
+		d.tx.unflushedDataPointer[table] = 0
+		d.tx.unflushedData[table] = &[DATAOBJECT_SIZE][]any{}
+	}
+
+	if pointer == DATAOBJECT_SIZE {
+		d.flushRows(table)
+		pointer = 0
+	}
+
+	d.tx.unflushedData[table][pointer] = row
+	d.tx.unflushedDataPointer[table]++
 	return nil
 }
 
@@ -335,30 +358,31 @@ func (d *client) flushRows(table string) error {
 	return nil
 }
 
-func (d *client) writeRow(table string, row []any) error {
+func (d *client) scan(table string) (*scanIterator, error) {
 	if d.tx == nil {
-		return errNoTx
+		return nil, errNoTx
 	}
 
-	if _, ok := d.tx.tables[table]; !ok {
-		return errNoTable
+	var dataobjects []string
+	allActions := append(d.tx.previousActions[table], d.tx.Actions[table]...)
+	for _, action := range allActions {
+		if action.AddDataobject != nil {
+			dataobjects = append(dataobjects, action.AddDataobject.Name)
+		}
 	}
 
-	// Try to find an unflushed/in-memory dataobject for this table
-	pointer, ok := d.tx.unflushedDataPointer[table]
-	if !ok {
-		d.tx.unflushedDataPointer[table] = 0
-		d.tx.unflushedData[table] = &[DATAOBJECT_SIZE][]any{}
+	var unflushedRows [DATAOBJECT_SIZE][]any
+	if data, ok := d.tx.unflushedData[table]; ok {
+		unflushedRows = *data
 	}
 
-	if pointer == DATAOBJECT_SIZE {
-		d.flushRows(table)
-		pointer = 0
-	}
-
-	d.tx.unflushedData[table][pointer] = row
-	d.tx.unflushedDataPointer[table]++
-	return nil
+	return &scanIterator{
+		unflushedRows:    unflushedRows,
+		unflushedRowsLen: d.tx.unflushedDataPointer[table],
+		d:                d,
+		table:            table,
+		dataobjects:      dataobjects,
+	}, nil
 }
 
 type scanIterator struct {
@@ -426,33 +450,6 @@ func (si *scanIterator) next() ([]any, error) {
 	return row, nil
 }
 
-func (d *client) scan(table string) (*scanIterator, error) {
-	if d.tx == nil {
-		return nil, errNoTx
-	}
-
-	var dataobjects []string
-	allActions := append(d.tx.previousActions[table], d.tx.Actions[table]...)
-	for _, action := range allActions {
-		if action.AddDataobject != nil {
-			dataobjects = append(dataobjects, action.AddDataobject.Name)
-		}
-	}
-
-	var unflushedRows [DATAOBJECT_SIZE][]any
-	if data, ok := d.tx.unflushedData[table]; ok {
-		unflushedRows = *data
-	}
-
-	return &scanIterator{
-		unflushedRows:    unflushedRows,
-		unflushedRowsLen: d.tx.unflushedDataPointer[table],
-		d:                d,
-		table:            table,
-		dataobjects:      dataobjects,
-	}, nil
-}
-
 func (d *client) commitTx() error {
 	if d.tx == nil {
 		return errNoTx
@@ -462,6 +459,7 @@ func (d *client) commitTx() error {
 	for table := range d.tx.tables {
 		err := d.flushRows(table)
 		if err != nil {
+			d.tx = nil
 			return err
 		}
 	}
@@ -475,16 +473,18 @@ func (d *client) commitTx() error {
 	}
 	// Read-only transaction, no need to do a concurrency check.
 	if !wrote {
+		d.tx = nil
 		return nil
 	}
 
-	filename := fmt.Sprintf("_log_%020d", d.tx.id)
+	filename := fmt.Sprintf("_log_%020d", d.tx.Id)
 	// We won't store previous actions, they will be recovered on
 	// new transactions. So unset them. Honestly not totally
 	// clear why.
 	d.tx.previousActions = nil
 	bytes, err := json.Marshal(d.tx)
 	if err != nil {
+		d.tx = nil
 		return err
 	}
 
