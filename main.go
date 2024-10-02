@@ -114,7 +114,14 @@ func (fos *fileObjectStorage) putIfAbsent(name string, bytes []byte) error {
 	}
 
 	filename := path.Join(fos.basedir, name)
-	return os.Link(tmpfilename, filename)
+	err = os.Link(tmpfilename, filename)
+	if err != nil {
+		removeErr := os.Remove(tmpfilename)
+		assert(removeErr == nil, "could not remove")
+		return err
+	}
+
+	return nil
 }
 
 func (fos *fileObjectStorage) listPrefix(prefix string) ([]string, error) {
